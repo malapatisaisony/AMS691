@@ -10,7 +10,12 @@ Writes into the index directory:
   chunk_map.json      doc_id -> [chunk ids]   (for origin_chunks / ACL checks)
   ingest_report.json  per-entity merge check: does a node exist under the exact
                       canonical name, how many source chunks it has, and the
-                      realized merge regime (>= 8 fragments vs < 8).
+                      source-count hub proxy (>= 8 chunks vs < 8).
+  c4_fragments.sqlite3 original entity/relation descriptions and source ACLs,
+                      captured before merging (unless disabled in config).
+
+The source-count proxy is not an observation of whether an LLM summary ran;
+LightRAG also applies token limits and may merge prior summaries incrementally.
 """
 from __future__ import annotations
 
@@ -40,7 +45,7 @@ def read_docs(corpus: Path) -> tuple[list[str], list[str]]:
 async def ingest(cfg: dict) -> dict:
     corpus: Path = cfg["corpus"]
     ids, texts = read_docs(corpus)
-    rag = await build_rag(cfg)
+    rag = await build_rag(cfg, capture_fragments=True)
     try:
         log.info("inserting %d docs from %s into %s", len(ids), corpus, cfg["working_dir"])
         await rag.ainsert(texts, ids=ids, file_paths=ids)
@@ -88,6 +93,8 @@ async def ingest(cfg: dict) -> dict:
             "hub_prediction_mismatches": [r["name"] for r in entities if r["found"] and
                                           (r["realized_regime"] == "hub") != bool(r["planned_hub"])],
             "entities": entities,
+            "c4_provenance": rag._c4_fragment_store.stats()
+                if hasattr(rag, "_c4_fragment_store") else None,
         }
         wd: Path = cfg["working_dir"]
         (wd / "chunk_map.json").write_text(json.dumps(chunk_map, indent=1))

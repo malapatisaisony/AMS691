@@ -68,10 +68,15 @@ class Scope:
     mode: Mode
     user_id: str
     access_set: str
+    c4_filter: Any = dataclasses.field(default=None, repr=False, compare=False)
+    c4_revision: str = ""
 
     @property
     def cache_scope(self) -> str:
-        return self.mode.value if self.mode is Mode.C1 else f"{self.mode.value}|{self.access_set}"
+        if self.mode is Mode.C1:
+            return self.mode.value
+        base = f"{self.mode.value}|{self.access_set}"
+        return f"{base}|{self.c4_revision}" if self.mode is Mode.C4 else base
 
 
 _SCOPE: contextvars.ContextVar[Scope | None] = contextvars.ContextVar("acl_scope", default=None)
@@ -83,7 +88,11 @@ C4Filter = Callable[[str, Any, dict, Scope, ACLIndex], Awaitable[dict]]
 _C4_FILTER: C4Filter | None = None
 
 
-def set_c4_description_filter(fn: C4Filter | None) -> None:
+def set_c4_description_filter(fn: C4Filter | None, *, acl: ACLIndex | None = None) -> None:
+    """Bind C4 to one ACL index; the legacy global hook remains supported."""
+    if acl is not None:
+        acl.c4_description_filter = fn
+        return
     global _C4_FILTER
     _C4_FILTER = fn
 
@@ -96,9 +105,11 @@ def current_scope() -> Scope | None:
 def acting_as(acl: ACLIndex, user_id: str, mode: "str | Mode") -> Iterator[Scope]:
     """Run the enclosed LightRAG query as ``user_id`` under configuration ``mode``."""
     m = Mode.parse(mode)
-    if m is Mode.C4 and _C4_FILTER is None:
+    c4_filter = getattr(acl, "c4_description_filter", _C4_FILTER) if m is Mode.C4 else None
+    if m is Mode.C4 and c4_filter is None:
         raise NotImplementedError("C4 needs set_c4_description_filter(...) (C4 owner)")
-    scope = Scope(m, user_id, acl.access_set_of(user_id))
+    revision = str(getattr(c4_filter, "cache_namespace", f"custom-{id(c4_filter)}")) if c4_filter else ""
+    scope = Scope(m, user_id, acl.access_set_of(user_id), c4_filter, revision)
     token = _SCOPE.set(scope)
     try:
         yield scope
@@ -134,8 +145,8 @@ def _install_prefilters(acl: ACLIndex, *, entities_vdb, relationships_vdb, chunk
         return out
 
     async def c4(kind: str, key: Any, data: dict, s: Scope) -> dict:
-        if s.mode is Mode.C4 and _C4_FILTER is not None:
-            return await _C4_FILTER(kind, key, data, s, acl)
+        if s.mode is Mode.C4 and s.c4_filter is not None:
+            return await s.c4_filter(kind, key, data, s, acl)
         return data
 
     # ---- vector stores: oversample, filter, cut to top_k

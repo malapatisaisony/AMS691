@@ -48,7 +48,7 @@ def _llm_and_embedding(b: dict[str, Any]):
     return llm, emb
 
 
-async def build_rag(cfg: dict[str, Any]):
+async def build_rag(cfg: dict[str, Any], *, capture_fragments: bool = False):
     """Create and initialise the LightRAG instance for this corpus (stock, no ACL yet)."""
     from lightrag import LightRAG  # noqa: PLC0415
 
@@ -64,22 +64,54 @@ async def build_rag(cfg: dict[str, Any]):
         embedding_func=emb,
     )
     for k in ("chunk_token_size", "chunk_overlap_token_size", "tiktoken_model_name",
-              "force_llm_summary_on_merge"):
+              "force_llm_summary_on_merge", "summary_max_tokens", "summary_context_size",
+              "summary_length_recommended"):
         if k in lr:
             kwargs[k] = lr[k]
     if b["llm"] == "ollama":
         kwargs["llm_model_kwargs"] = {"host": b["ollama_host"]}
     rag = LightRAG(**kwargs)
     await rag.initialize_storages()
+    if capture_fragments and cfg.get("c4", {}).get("capture_fragments", True):
+        from .fragments import FragmentStore, install_fragment_capture
+        store = None
+        try:
+            store = FragmentStore(fragment_path(cfg), cfg["corpus"], create=True)
+            install_fragment_capture(rag, store)
+        except Exception:
+            if store is not None and not getattr(rag, "_c4_capture_installed", False):
+                store.close()
+            await rag.finalize_storages()
+            raise
     return rag
 
 
-async def build_acl_rag(cfg: dict[str, Any]):
-    """LightRAG + ACL index with C2/C3 enforcement installed."""
+def fragment_path(cfg: dict[str, Any]) -> Path:
+    return Path(cfg["working_dir"]) / cfg.get("c4", {}).get("fragments_file", "c4_fragments.sqlite3")
+
+
+async def build_acl_rag(cfg: dict[str, Any], *, mode=None):
+    """LightRAG + ACL enforcement; C4 also opens its captured-fragment store."""
     from .acl import ACLIndex  # noqa: PLC0415
-    from .enforce import install  # noqa: PLC0415
+    from .enforce import Mode, install, set_c4_description_filter  # noqa: PLC0415
 
     rag = await build_rag(cfg)
     acl = ACLIndex(cfg["corpus"])
     install(rag, acl, max_candidates=cfg.get("acl", {}).get("max_candidates", 4096))
+    if mode is not None and Mode.parse(mode) is Mode.C4:
+        from .c4 import C4DescriptionFilter, lightrag_summarizer
+        from .fragments import FragmentStore, attach_store
+        try:
+            store = FragmentStore(fragment_path(cfg), cfg["corpus"])
+            attach_store(rag, store)
+            if not store.stats()["fragments"]:
+                from .fragments import MissingProvenanceError
+                raise MissingProvenanceError("C4 fragment store is empty. Re-ingest with capture enabled.")
+            strategy = cfg.get("c4", {}).get("description_strategy", "auto")
+            callback = C4DescriptionFilter(store, strategy=strategy,
+                                           summarize=lightrag_summarizer(rag) if strategy == "auto" else None)
+            set_c4_description_filter(callback, acl=acl)
+        except Exception:
+            await rag.finalize_storages()
+            raise
     return rag, acl

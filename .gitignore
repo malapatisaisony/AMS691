@@ -4,3 +4,8 @@ __pycache__/
 *.pyc
 rag_storage/
 results/
+.venv/
+.pytest_cache/
+.env
+*.sqlite3
+*.sqlite3-journal

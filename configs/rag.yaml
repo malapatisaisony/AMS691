@@ -33,5 +33,10 @@ query:
 acl:
   max_candidates: 4096        # C3 oversampling ceiling per vector search
 
+c4:
+  capture_fragments: true     # preserve originals during ingestion, before merging
+  fragments_file: c4_fragments.sqlite3
+  description_strategy: auto # auto: pinned LightRAG summary policy; join: deterministic no-LLM composition
+
 eval:
   recall_k: [1, 3, 5, 10]
